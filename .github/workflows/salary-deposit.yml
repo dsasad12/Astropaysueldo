@@ -10,6 +10,10 @@ on:
         description: 'Forzar depósito aunque no sea día de cobro'
         type: boolean
         default: false
+      amount:
+        description: 'Monto a depositar en ARS (dejar vacío para usar el del secret)'
+        type: string
+        default: ''
 
 jobs:
   deposit:
@@ -35,7 +39,8 @@ jobs:
           ASTROPAY_EMAIL: ${{ secrets.ASTROPAY_EMAIL }}
           ASTROPAY_PASSWORD: ${{ secrets.ASTROPAY_PASSWORD }}
           CARD_LAST4: ${{ secrets.CARD_LAST4 }}
-          DEPOSIT_AMOUNT: ${{ secrets.DEPOSIT_AMOUNT }}
+          # Si se ingresó un monto manual en el dispatch, ese tiene prioridad
+          DEPOSIT_AMOUNT: ${{ inputs.amount != '' && inputs.amount || secrets.DEPOSIT_AMOUNT }}
           LOG_LEVEL: INFO
         run: |
           if [ "${{ inputs.force }}" = "true" ]; then
