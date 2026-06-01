@@ -1,225 +1,270 @@
 """
-Automatización de AstroPay via Playwright con modo stealth.
+AstroPay HTTP API client.
+Reemplaza la automatización de Playwright con llamadas directas a la API móvil.
+
+Flujo:
+1. POST /v4/auth/refresh          → access_token
+2. GET  /v1/payment-elements/DR   → payment_element_external_id de la tarjeta
+3. POST /v1/purchases/preview/authorization  → validación (respuesta vacía)
+4. POST /v2/purchases/preview/summary        → preview_external_id + fees
+5. Obtener tokenizer JWT  (endpoint a confirmar en primera ejecución real)
+6. POST tokenizer.cc.astropay.com/public/v1/token  → card_token
+7. POST /v2/purchases/confirm                → depósito final
+
+TODO (first real deposit): capture steps 5-7 in HTTP Catcher to verify endpoints.
 """
 
-import json
 import logging
 import os
-from pathlib import Path
 
-from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
+import requests
 
 logger = logging.getLogger(__name__)
 
-SESSION_FILE = Path("astropay_session.json")
-BASE_URL = "https://app.astropay.com"
-
-CHROMIUM_ARGS = [
-    "--no-sandbox",
-    "--disable-dev-shm-usage",
-    "--disable-gpu",
-    "--disable-blink-features=AutomationControlled",
-]
-
-USER_AGENT = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-    "AppleWebKit/537.36 (KHTML, like Gecko) "
-    "Chrome/124.0.0.0 Safari/537.36"
-)
+BASE_URL = "https://mapi.astropaycard.com"
+TOKENIZER_URL = "https://tokenizer.cc.astropay.com"
+USER_AGENT = "AstroPay/816 CFNetwork/3860.600.12 Darwin/25.5.0"
+DEVICE_ID = "B7C457FE-AAF1-4504-9E61-8928CF1762DC"
 
 
 class AstroPayWebError(Exception):
     pass
 
 
-def _save_session(context):
-    SESSION_FILE.write_text(json.dumps(context.storage_state()))
-    logger.debug("Sesión guardada.")
+def _headers(access_token: str | None = None) -> dict:
+    h = {
+        "AppName": "APC",
+        "Accept": "*/*",
+        "Country": "AR",
+        "Platform": "iOS",
+        "Device-Info": "iPhone14,5 | 26.5 | iPhone | Jailbreak false",
+        "Accept-Encoding": "gzip, deflate, br",
+        "Accept-Language": "es-AR",
+        "User-Agent": USER_AGENT,
+        "AppVersion": "5.71.0",
+        "TimeZone": "America/Argentina/Buenos_Aires",
+        "Device-ID": DEVICE_ID,
+        "AMP-Device-ID": DEVICE_ID,
+        "Content-Type": "application/json",
+        "Connection": "keep-alive",
+    }
+    if access_token:
+        h["Authorization"] = f"Bearer {access_token}"
+    return h
 
 
-def _new_page(context):
-    page = context.new_page()
-    # Ocultar que es un browser automatizado
-    page.add_init_script("""
-        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-        Object.defineProperty(navigator, 'plugins', { get: () => [1,2,3] });
-        window.chrome = { runtime: {} };
-    """)
-    return page
-
-
-def _do_login(page, email: str, pin: str):
-    logger.info("Navegando al login...")
-    page.goto(f"{BASE_URL}/login", wait_until="domcontentloaded", timeout=30000)
-
-    # Screenshot inmediato para ver qué cargó
-    page.screenshot(path="debug_login.png")
-    logger.info("Login page URL: %s | Título: %s", page.url, page.title())
-
-    # Loguear todos los inputs y botones visibles
-    try:
-        elementos = page.evaluate("""
-            () => Array.from(document.querySelectorAll('input, button, [role="button"]'))
-                 .map(el => `${el.tagName}|type=${el.type}|name=${el.name}|placeholder=${el.placeholder}|text=${el.innerText}`)
-                 .join(' || ')
-        """)
-        logger.info("Elementos en login: %s", elementos)
-    except Exception:
-        pass
-
-    # Esperar cualquier input visible
-    page.wait_for_selector("input", timeout=20000)
-    page.screenshot(path="debug_login2.png")
-
-    # Intentar llenar email con varios selectores posibles
-    email_input = (
-        page.locator('input[type="email"]')
-        .or_(page.locator('input[name="email"]'))
-        .or_(page.locator('input[type="text"]'))
-        .or_(page.locator('input[placeholder*="email" i]'))
-        .or_(page.locator('input[placeholder*="correo" i]'))
-        .or_(page.locator('input[placeholder*="usuario" i]'))
-        .first
+def _refresh_access_token(refresh_token: str) -> tuple[str, str]:
+    resp = requests.post(
+        f"{BASE_URL}/v4/auth/refresh",
+        json={"refresh_token": refresh_token},
+        headers=_headers(),
+        timeout=30,
     )
-    email_input.fill(email)
-
-    pin_input = (
-        page.locator('input[type="password"]')
-        .or_(page.locator('input[name="password"]'))
-        .or_(page.locator('input[name="pin"]'))
-        .or_(page.locator('input[placeholder*="pin" i]'))
-        .or_(page.locator('input[placeholder*="contraseña" i]'))
-        .first
+    if not resp.ok:
+        raise AstroPayWebError(
+            f"Error al refrescar token: {resp.status_code} — {resp.text[:200]}"
+        )
+    session = resp.json()["session"]
+    logger.info(
+        "Token refrescado. Expira en %ss.", session.get("access_expires_in", "?")
     )
-    pin_input.fill(pin)
+    return session["access_token"], session.get("refresh_token", refresh_token)
 
-    page.locator('button[type="submit"]').first.click()
 
-    try:
-        page.wait_for_selector('input[type="password"]', state="detached", timeout=20000)
-    except PlaywrightTimeout:
-        pass
+def _get_card_external_id(access_token: str, card_last4: str) -> str:
+    resp = requests.get(
+        f"{BASE_URL}/v1/payment-elements/DR",
+        headers=_headers(access_token),
+        timeout=30,
+    )
+    resp.raise_for_status()
+    for card in resp.json().get("payment_elements", []):
+        if card.get("last_four_digits") == card_last4 and card.get("enable"):
+            eid = card["payment_element_external_id"]
+            logger.info(
+                "Tarjeta encontrada: %s **** %s", card.get("brand", ""), card_last4
+            )
+            return eid
+    raise AstroPayWebError(f"Tarjeta **** {card_last4} no encontrada o deshabilitada.")
 
-    page.wait_for_load_state("networkidle", timeout=20000)
-    page.screenshot(path="debug_after_login.png")
-    logger.info("Login enviado. URL actual: %s", page.url)
+
+def _purchase_preview(
+    access_token: str, amount: float, card_external_id: str
+) -> str:
+    """Corre el flujo preview y devuelve preview_external_id."""
+    body = {
+        "amount": int(amount),
+        "operation": "WALLET_BALANCE",
+        "currency": "ARS",
+        "payment_method": "DR",
+        "payment_element_external_id": card_external_id,
+    }
+    r = requests.post(
+        f"{BASE_URL}/v1/purchases/preview/authorization",
+        json=body,
+        headers=_headers(access_token),
+        timeout=30,
+    )
+    if not r.ok:
+        raise AstroPayWebError(
+            f"Error en preview/authorization: {r.status_code} — {r.text[:200]}"
+        )
+
+    r = requests.post(
+        f"{BASE_URL}/v2/purchases/preview/summary",
+        json=body,
+        headers=_headers(access_token),
+        timeout=30,
+    )
+    r.raise_for_status()
+    data = r.json()
+
+    for item in data.get("summary", []):
+        logger.info("  %s: %s", item["label"], item["value"])
+
+    return data["preview_external_id"]
+
+
+def _get_tokenizer_jwt(access_token: str, preview_external_id: str) -> str:
+    """
+    Obtiene el JWT de corta duración para el tokenizador.
+
+    TODO: el endpoint exacto debe confirmarse en la primera ejecución real.
+    Capturá en HTTP Catcher la llamada que precede a tokenizer.cc.astropay.com
+    y actualizá esta función con el URL correcto.
+    """
+    candidates = [
+        ("GET",  f"{BASE_URL}/v1/purchases/{preview_external_id}/tokenizer-jwt"),
+        ("GET",  f"{BASE_URL}/v2/purchases/{preview_external_id}/tokenizer-jwt"),
+        ("POST", f"{BASE_URL}/v1/purchases/{preview_external_id}/tokenizer"),
+        ("GET",  f"{BASE_URL}/v1/tokenizer/jwt"),
+        ("POST", f"{TOKENIZER_URL}/public/v1/auth"),
+    ]
+    for method, url in candidates:
+        try:
+            if method == "GET":
+                r = requests.get(url, headers=_headers(access_token), timeout=10)
+            else:
+                r = requests.post(
+                    url,
+                    json={"access_token": access_token},
+                    headers=_headers(access_token),
+                    timeout=10,
+                )
+            if r.ok and r.content:
+                payload = r.json()
+                jwt = (
+                    payload.get("token")
+                    or payload.get("jwt")
+                    or payload.get("access_token")
+                )
+                if jwt and "." in str(jwt):
+                    logger.info("Tokenizer JWT obtenido de: %s", url)
+                    return str(jwt)
+        except Exception as exc:
+            logger.debug("Fallo %s %s: %s", method, url, exc)
+
+    logger.warning(
+        "No se obtuvo tokenizer JWT — usando access_token como fallback. "
+        "Si el depósito falla aquí, capturá el endpoint correcto en HTTP Catcher."
+    )
+    return access_token
+
+
+def _tokenize_cvv(tokenizer_jwt: str, cvv: str) -> str:
+    resp = requests.post(
+        f"{TOKENIZER_URL}/public/v1/token",
+        json={"value": cvv, "volatile": True},
+        headers={
+            "Accept": "*/*",
+            "Accept-Encoding": "gzip, deflate, br",
+            "Accept-Language": "es-419,es;q=0.9",
+            "Content-Type": "application/json",
+            "User-Agent": USER_AGENT,
+            "Authorization": f"Bearer {tokenizer_jwt}",
+        },
+        timeout=30,
+    )
+    if not resp.ok:
+        raise AstroPayWebError(
+            f"Error en tokenizer: {resp.status_code} — {resp.text[:200]}"
+        )
+    token = resp.json()["token"]
+    logger.info("CVV tokenizado. Token: %s…", token[:20])
+    return token
+
+
+def _confirm_purchase(
+    access_token: str,
+    preview_external_id: str,
+    card_token: str,
+    amount: float,
+    card_external_id: str,
+) -> bool:
+    """
+    Confirma la compra.
+
+    TODO: verificar endpoint y cuerpo exactos capturando en HTTP Catcher
+    durante el primer depósito real (slide-to-confirm en la app).
+    """
+    body = {
+        "preview_external_id": preview_external_id,
+        "payment_element_external_id": card_external_id,
+        "payment_method": "DR",
+        "operation": "WALLET_BALANCE",
+        "currency": "ARS",
+        "amount": int(amount),
+        "card_token": card_token,
+    }
+    resp = requests.post(
+        f"{BASE_URL}/v2/purchases/confirm",
+        json=body,
+        headers=_headers(access_token),
+        timeout=60,
+    )
+    logger.info("Confirm HTTP %s", resp.status_code)
+
+    if not resp.ok:
+        logger.error("Error en confirm: %s — %s", resp.status_code, resp.text[:500])
+        return False
+
+    data = resp.json()
+    logger.info("Confirm response: %s", data)
+
+    status = str(data.get("status", "")).lower()
+    return status in {"approved", "success", "completed", "ok", "aprobado", "exitoso"}
 
 
 def deposit(amount: float, card_last4: str) -> bool:
-    email = os.getenv("ASTROPAY_EMAIL", "")
-    pin = os.getenv("ASTROPAY_PASSWORD", "")
+    refresh_token = os.getenv("ASTROPAY_REFRESH_TOKEN", "")
+    cvv = os.getenv("CARD_CVV", "")
 
-    if not email or not pin:
-        raise AstroPayWebError("Faltan ASTROPAY_EMAIL o ASTROPAY_PASSWORD en los secrets.")
+    if not refresh_token:
+        raise AstroPayWebError("Falta ASTROPAY_REFRESH_TOKEN en los secrets.")
+    if not cvv:
+        raise AstroPayWebError("Falta CARD_CVV en los secrets.")
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True, args=CHROMIUM_ARGS)
-        context = browser.new_context(
-            user_agent=USER_AGENT,
-            viewport={"width": 390, "height": 844},
-            locale="es-AR",
-        )
+    logger.info(
+        "=== Iniciando depósito %s ARS → tarjeta **** %s ===", int(amount), card_last4
+    )
 
-        page = _new_page(context)
+    access_token, _ = _refresh_access_token(refresh_token)
+    card_external_id = _get_card_external_id(access_token, card_last4)
 
-        try:
-            # Siempre hacer login explícito (GitHub Actions no tiene sesión)
-            _do_login(page, email, pin)
+    logger.info("Obteniendo preview...")
+    preview_id = _purchase_preview(access_token, amount, card_external_id)
+    logger.info("preview_external_id: %s", preview_id)
 
-            # Navegar al home después del login
-            if "/home" not in page.url:
-                page.goto(f"{BASE_URL}/home", wait_until="domcontentloaded", timeout=30000)
+    logger.info("Tokenizando CVV...")
+    tokenizer_jwt = _get_tokenizer_jwt(access_token, preview_id)
+    card_token = _tokenize_cvv(tokenizer_jwt, cvv)
 
-            # Esperar que cargue el contenido React (hasta 20s)
-            logger.info("Esperando contenido del home...")
-            try:
-                page.wait_for_selector("button, [role='button']", timeout=20000)
-            except PlaywrightTimeout:
-                logger.warning("No aparecieron botones en 20s.")
+    logger.info("Confirmando depósito...")
+    ok = _confirm_purchase(access_token, preview_id, card_token, amount, card_external_id)
 
-            page.screenshot(path="debug_home.png")
+    if ok:
+        logger.info("Depósito de %s ARS completado.", int(amount))
+    else:
+        logger.warning("Depósito no confirmado — revisar logs para el próximo paso.")
 
-            # Loguear botones visibles
-            try:
-                visible = page.evaluate(
-                    "() => Array.from(document.querySelectorAll("
-                    "'button, a, [role=\"button\"], [role=\"link\"]'))"
-                    ".map(el => el.innerText.trim()).filter(t => t).join(' | ')"
-                )
-                logger.info("Botones en home: %s", visible)
-            except Exception:
-                pass
-
-            logger.info("Buscando botón de depósito...")
-            deposit_btn = (
-                page.locator('[data-testid*="deposit"]')
-                .or_(page.locator('[data-testid*="add-funds"]'))
-                .or_(page.locator('[data-testid*="recharge"]'))
-                .or_(page.get_by_text("Agregar saldo", exact=False))
-                .or_(page.get_by_text("Cargar saldo", exact=False))
-                .or_(page.get_by_text("Depositar", exact=False))
-                .or_(page.get_by_text("Recargar", exact=False))
-                .or_(page.get_by_text("Add funds", exact=False))
-                .first
-            )
-            deposit_btn.click(timeout=15000)
-            page.wait_for_load_state("networkidle")
-            page.screenshot(path="debug_deposit_page.png")
-
-            # Loguear contenido de la página de depósito
-            try:
-                visible2 = page.evaluate(
-                    "() => Array.from(document.querySelectorAll("
-                    "'button, a, [role=\"button\"], input'))"
-                    ".map(el => (el.innerText || el.placeholder || el.type || '').trim())"
-                    ".filter(t => t).join(' | ')"
-                )
-                logger.info("Elementos en página depósito: %s", visible2)
-            except Exception:
-                pass
-
-            # Seleccionar tarjeta
-            logger.info("Seleccionando tarjeta **** %s...", card_last4)
-            page.get_by_text(card_last4, exact=False).first.click(timeout=10000)
-            page.wait_for_load_state("networkidle")
-
-            # Ingresar monto
-            logger.info("Ingresando monto: %s ARS...", int(amount))
-            amount_input = (
-                page.locator('input[type="number"]')
-                .or_(page.locator('input[inputmode="numeric"]'))
-                .or_(page.locator('input[inputmode="decimal"]'))
-                .or_(page.locator('input[placeholder*="monto"]'))
-                .or_(page.locator('input[placeholder*="amount"]'))
-                .first
-            )
-            amount_input.fill(str(int(amount)))
-
-            # Confirmar
-            confirm_btn = (
-                page.locator('button[type="submit"]')
-                .or_(page.get_by_text("Confirmar", exact=False))
-                .or_(page.get_by_text("Continuar", exact=False))
-                .first
-            )
-            confirm_btn.click(timeout=10000)
-
-            # Esperar confirmación
-            try:
-                page.wait_for_selector(
-                    ':text("exitoso"), :text("aprobado"), :text("success"), :text("approved")',
-                    timeout=20000,
-                )
-                logger.info("Depósito de %s ARS completado.", int(amount))
-                _save_session(context)
-                return True
-            except PlaywrightTimeout:
-                page.screenshot(path="deposit_result.png")
-                logger.warning("Sin confirmación visible. Revisá deposit_result.png")
-                return False
-
-        except PlaywrightTimeout as e:
-            page.screenshot(path="deposit_error.png")
-            raise AstroPayWebError(f"Timeout: {e}") from e
-        finally:
-            browser.close()
+    return ok

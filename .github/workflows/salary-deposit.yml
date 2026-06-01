@@ -31,13 +31,10 @@ jobs:
       - name: Instalar dependencias Python
         run: pip install -r requirements.txt
 
-      - name: Instalar Playwright + Chromium
-        run: playwright install --with-deps chromium
-
       - name: Ejecutar depósito
         env:
-          ASTROPAY_EMAIL: ${{ secrets.ASTROPAY_EMAIL }}
-          ASTROPAY_PASSWORD: ${{ secrets.ASTROPAY_PASSWORD }}
+          ASTROPAY_REFRESH_TOKEN: ${{ secrets.ASTROPAY_REFRESH_TOKEN }}
+          CARD_CVV: ${{ secrets.CARD_CVV }}
           CARD_LAST4: ${{ secrets.CARD_LAST4 }}
           # Si se ingresó un monto manual en el dispatch, ese tiene prioridad
           DEPOSIT_AMOUNT: ${{ inputs.amount != '' && inputs.amount || secrets.DEPOSIT_AMOUNT }}
@@ -48,13 +45,3 @@ jobs:
           else
             python main.py
           fi
-
-      - name: Subir screenshots de debug
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: deposit-screenshots
-          path: |
-            debug_*.png
-            deposit_*.png
-          if-no-files-found: ignore

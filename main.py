@@ -41,7 +41,7 @@ logger = logging.getLogger(__name__)
 
 
 def load_config() -> dict:
-    required = ["ASTROPAY_EMAIL", "ASTROPAY_PASSWORD", "CARD_LAST4", "DEPOSIT_AMOUNT"]
+    required = ["ASTROPAY_REFRESH_TOKEN", "CARD_CVV", "CARD_LAST4", "DEPOSIT_AMOUNT"]
     missing = [k for k in required if not os.getenv(k)]
     if missing:
         logger.error("Faltan variables en .env: %s", ", ".join(missing))
