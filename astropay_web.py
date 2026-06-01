@@ -105,6 +105,18 @@ def deposit(amount: float, card_last4: str) -> bool:
             page.screenshot(path="debug_home.png")
             logger.info("Home cargado. URL: %s", page.url)
 
+            # Loguear todo el texto visible para diagnóstico
+            try:
+                visible_text = page.evaluate("""
+                    () => Array.from(document.querySelectorAll('button, a, [role="button"]'))
+                         .map(el => el.innerText.trim())
+                         .filter(t => t.length > 0)
+                         .join(' | ')
+                """)
+                logger.info("Botones/links visibles en home: %s", visible_text)
+            except Exception:
+                pass
+
             # Buscar botón de agregar saldo — selectores separados para evitar error de sintaxis
             logger.info("Buscando botón de depósito...")
             deposit_btn = (
