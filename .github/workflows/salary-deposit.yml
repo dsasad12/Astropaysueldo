@@ -49,12 +49,12 @@ jobs:
             python main.py
           fi
 
-      - name: Subir screenshot si hubo error
-        if: failure()
+      - name: Subir screenshots de debug
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: deposit-screenshot
+          name: deposit-screenshots
           path: |
-            deposit_error.png
-            deposit_result.png
+            debug_*.png
+            deposit_*.png
           if-no-files-found: ignore
