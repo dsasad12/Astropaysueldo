@@ -52,21 +52,49 @@ def _do_login(page, email: str, pin: str):
     logger.info("Navegando al login...")
     page.goto(f"{BASE_URL}/login", wait_until="domcontentloaded", timeout=30000)
 
-    # Esperar que aparezca el campo de email
-    page.wait_for_selector('input[type="email"], input[name="email"]', timeout=15000)
+    # Screenshot inmediato para ver qué cargó
     page.screenshot(path="debug_login.png")
+    logger.info("Login page URL: %s | Título: %s", page.url, page.title())
 
-    page.locator('input[type="email"]').or_(
-        page.locator('input[name="email"]')
-    ).first.fill(email)
+    # Loguear todos los inputs y botones visibles
+    try:
+        elementos = page.evaluate("""
+            () => Array.from(document.querySelectorAll('input, button, [role="button"]'))
+                 .map(el => `${el.tagName}|type=${el.type}|name=${el.name}|placeholder=${el.placeholder}|text=${el.innerText}`)
+                 .join(' || ')
+        """)
+        logger.info("Elementos en login: %s", elementos)
+    except Exception:
+        pass
 
-    page.locator('input[type="password"]').or_(
-        page.locator('input[name="password"]')
-    ).first.fill(pin)
+    # Esperar cualquier input visible
+    page.wait_for_selector("input", timeout=20000)
+    page.screenshot(path="debug_login2.png")
+
+    # Intentar llenar email con varios selectores posibles
+    email_input = (
+        page.locator('input[type="email"]')
+        .or_(page.locator('input[name="email"]'))
+        .or_(page.locator('input[type="text"]'))
+        .or_(page.locator('input[placeholder*="email" i]'))
+        .or_(page.locator('input[placeholder*="correo" i]'))
+        .or_(page.locator('input[placeholder*="usuario" i]'))
+        .first
+    )
+    email_input.fill(email)
+
+    pin_input = (
+        page.locator('input[type="password"]')
+        .or_(page.locator('input[name="password"]'))
+        .or_(page.locator('input[name="pin"]'))
+        .or_(page.locator('input[placeholder*="pin" i]'))
+        .or_(page.locator('input[placeholder*="contraseña" i]'))
+        .first
+    )
+    pin_input.fill(pin)
 
     page.locator('button[type="submit"]').first.click()
 
-    # Esperar que desaparezca el formulario de login
     try:
         page.wait_for_selector('input[type="password"]', state="detached", timeout=20000)
     except PlaywrightTimeout:
