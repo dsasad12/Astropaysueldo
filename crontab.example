@@ -1,0 +1,35 @@
+# ─── Cron para depósito automático de sueldo docente ─────────────────────────
+#
+# Cómo configurar:
+#   1. Abrí el editor de cron:  crontab -e
+#   2. Pegá la línea de abajo (ajustá la ruta al directorio del proyecto)
+#   3. Guardá y salí
+#
+# La línea de abajo ejecuta el script todos los días hábiles a las 08:00 AM.
+# El script solo hace el depósito si es el 5to día hábil del mes.
+#
+# Formato: minuto hora dia_mes mes dia_semana comando
+# Lunes a Viernes, 08:00 AM
+0 8 * * 1-5 cd /ruta/a/Astropaysueldo && /usr/bin/python3 main.py >> /var/log/astropay_salary_cron.log 2>&1
+
+# ─── Alternativa: con virtualenv ──────────────────────────────────────────────
+# 0 8 * * 1-5 cd /ruta/a/Astropaysueldo && /ruta/a/Astropaysueldo/venv/bin/python main.py >> /var/log/astropay_salary_cron.log 2>&1
+
+# ─── Pasos para configurar en Linux/macOS ─────────────────────────────────────
+# 1. Instalá dependencias:
+#      cd /ruta/a/Astropaysueldo
+#      pip install -r requirements.txt
+#
+# 2. Copiá el archivo de configuración:
+#      cp .env.example .env
+#
+# 3. Editá .env con tus datos reales:
+#      nano .env
+#
+# 4. Probá manualmente que funciona (en modo sandbox):
+#      python main.py --preview    # ver próximos días de cobro
+#      python main.py --force      # probar el depósito (en sandbox)
+#
+# 5. Cuando todo funcione, cambiá ASTROPAY_ENV=production en .env
+#
+# 6. Activá el cron con: crontab -e
