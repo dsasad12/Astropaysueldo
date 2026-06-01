@@ -1,0 +1,8 @@
+.env
+*.log
+*.png
+astropay_session.json
+__pycache__/
+*.pyc
+venv/
+.venv/

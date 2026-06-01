@@ -1,0 +1,60 @@
+name: Depósito Sueldo AstroPay
+
+on:
+  schedule:
+    # 03:05 UTC = 00:05 hora Argentina (UTC-3), lunes a viernes
+    - cron: '5 3 * * 1-5'
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 'Forzar depósito aunque no sea día de cobro'
+        type: boolean
+        default: false
+      amount:
+        description: 'Monto a depositar en ARS (dejar vacío para usar el del secret)'
+        type: string
+        default: ''
+
+jobs:
+  deposit:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout del repositorio
+        uses: actions/checkout@v4
+
+      - name: Configurar Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Instalar dependencias Python
+        run: pip install -r requirements.txt
+
+      - name: Instalar Playwright + Chromium
+        run: playwright install --with-deps chromium
+
+      - name: Ejecutar depósito
+        env:
+          ASTROPAY_EMAIL: ${{ secrets.ASTROPAY_EMAIL }}
+          ASTROPAY_PASSWORD: ${{ secrets.ASTROPAY_PASSWORD }}
+          CARD_LAST4: ${{ secrets.CARD_LAST4 }}
+          # Si se ingresó un monto manual en el dispatch, ese tiene prioridad
+          DEPOSIT_AMOUNT: ${{ inputs.amount != '' && inputs.amount || secrets.DEPOSIT_AMOUNT }}
+          LOG_LEVEL: INFO
+        run: |
+          if [ "${{ inputs.force }}" = "true" ]; then
+            python main.py --force
+          else
+            python main.py
+          fi
+
+      - name: Subir screenshot si hubo error
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deposit-screenshot
+          path: |
+            deposit_error.png
+            deposit_result.png
+          if-no-files-found: ignore
