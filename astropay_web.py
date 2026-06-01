@@ -102,13 +102,21 @@ def deposit(amount: float, card_last4: str) -> bool:
                 _do_login(page, email, pin)
                 _save_session(context)
 
-            page.screenshot(path="debug_home.png")
             logger.info("Home cargado. URL: %s", page.url)
 
-            # Loguear todo el texto visible para diagnóstico
+            # Esperar a que la app React termine de renderizar (hasta 15s)
+            logger.info("Esperando que cargue el contenido de la app...")
+            try:
+                page.wait_for_selector("button, [role='button']", timeout=15000)
+            except PlaywrightTimeout:
+                logger.warning("No aparecieron botones en 15s, continuando igual...")
+
+            page.screenshot(path="debug_home.png")
+
+            # Loguear todos los botones visibles para diagnóstico
             try:
                 visible_text = page.evaluate("""
-                    () => Array.from(document.querySelectorAll('button, a, [role="button"]'))
+                    () => Array.from(document.querySelectorAll('button, a, [role="button"], [role="link"]'))
                          .map(el => el.innerText.trim())
                          .filter(t => t.length > 0)
                          .join(' | ')
@@ -117,7 +125,7 @@ def deposit(amount: float, card_last4: str) -> bool:
             except Exception:
                 pass
 
-            # Buscar botón de agregar saldo — selectores separados para evitar error de sintaxis
+            # Buscar botón de agregar saldo
             logger.info("Buscando botón de depósito...")
             deposit_btn = (
                 page.locator('[data-testid*="deposit"]')
