@@ -8,7 +8,6 @@ import os
 from pathlib import Path
 
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeout
-from playwright_stealth import stealth_sync
 
 logger = logging.getLogger(__name__)
 
@@ -40,7 +39,12 @@ def _save_session(context):
 
 def _new_page(context):
     page = context.new_page()
-    stealth_sync(page)
+    # Ocultar que es un browser automatizado
+    page.add_init_script("""
+        Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+        Object.defineProperty(navigator, 'plugins', { get: () => [1,2,3] });
+        window.chrome = { runtime: {} };
+    """)
     return page
 
 
